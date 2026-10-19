@@ -16,6 +16,10 @@ import type { AuthMechanism, ConnMode, Fact, LogKind, ProbeRequest, ProbeRespons
 
 const MAX_LOG_LINES = 2000;
 const MAX_RESPONSE_LINES = 200;
+/** Tope de bytes de una sola linea de respuesta del servidor. */
+const MAX_LINE_BYTES = 16 * 1024;
+/** Tope de bytes de una respuesta completa (sumando todas sus lineas). */
+const MAX_RESPONSE_BYTES = 128 * 1024;
 
 export class SmtpError extends Error {
   code: string;
@@ -348,6 +352,16 @@ class Session {
       }
 
       this.buf = concat(this.buf, chunk.value);
+
+      // Sin este tope, un servidor que no enviase nunca un salto de linea (y
+      // lo elige quien usa la herramienta) haria crecer el buffer sin limite
+      // dentro del isolate: el tiempo de espera no acota los bytes.
+      if (this.buf.length > MAX_LINE_BYTES) {
+        throw new SmtpError(
+          "protocol",
+          `El servidor envio una linea de mas de ${MAX_LINE_BYTES / 1024} KiB sin terminarla.`,
+        );
+      }
     }
   }
 
@@ -366,12 +380,20 @@ class Session {
     const lines = [first.slice(3).trim()];
     let more = first[3] === "-";
     let guard = 0;
+    let bytes = first.length;
 
     while (more) {
       if (++guard > MAX_RESPONSE_LINES) {
         throw new SmtpError("protocol", "El servidor envio una respuesta multilinea demasiado larga.");
       }
       const line = await this.readLine();
+      bytes += line.length;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        throw new SmtpError(
+          "protocol",
+          `El servidor envio una respuesta de mas de ${MAX_RESPONSE_BYTES / 1024} KiB.`,
+        );
+      }
       lines.push(line.length > 4 ? line.slice(4) : line.slice(3).trim());
       more = line[3] === "-";
     }
@@ -397,19 +419,32 @@ class Session {
     }
   }
 
-  async send(command: string, mask = false): Promise<void> {
-    const line = mask ? `${command.split(" ")[0]} ${this.maskPass()}` : command;
+  /**
+   * Escribe un comando y su CRLF.
+   *
+   * `mask` puede ser `true` (se oculta la linea completa) o una etiqueta fija
+   * que se registra en su lugar cuando el comando ES la credencial (los
+   * canales de AUTH mandan el usuario o la contrasena como un unico token, asi
+   * que quedarse con el primer token no basta: lo dejaria a la vista).
+   */
+  async send(command: string, mask: boolean | string = false): Promise<void> {
+    const line =
+      typeof mask === "string"
+        ? `${mask} ${this.maskPass()}`
+        : mask
+          ? this.maskPass()
+          : command;
     this.log.add("trace", `C: ${line}`);
     await this.sendRaw(command + "\r\n");
   }
 
-  async command(command: string, mask = false): Promise<SmtpResponse> {
+  async command(command: string, mask: boolean | string = false): Promise<SmtpResponse> {
     await this.send(command, mask);
     return this.readResponse();
   }
 
   /** Ejecuta un comando y exige un codigo concreto. */
-  async expect(command: string, expected: number[], mask = false): Promise<SmtpResponse> {
+  async expect(command: string, expected: number[], mask: boolean | string = false): Promise<SmtpResponse> {
     const res = await this.command(command, mask);
     if (!expected.includes(res.code)) {
       throw new SmtpError(
@@ -522,14 +557,14 @@ async function authenticate(
     if (res.code !== 334) {
       throw new SmtpError(`smtp-${res.code}`, `AUTH LOGIN respondio ${res.code}: ${res.lines.join(" ")}`);
     }
-    res = await session.command(b64Text(user), true);
+    res = await session.command(b64Text(user), "AUTH LOGIN usuario");
     if (res.code !== 334) {
       throw new SmtpError(
         `smtp-${res.code}`,
         `El servidor rechazo el usuario (${res.code}): ${res.lines.join(" ")}`,
       );
     }
-    res = await session.command(b64Text(pass), true);
+    res = await session.command(b64Text(pass), "AUTH LOGIN contrasena");
     if (res.code !== 235) {
       throw new SmtpError(
         "auth",
@@ -542,7 +577,7 @@ async function authenticate(
 
   if (mechanism === "PLAIN") {
     const token = b64Text(`\0${user}\0${pass}`);
-    const res = await session.command(`AUTH PLAIN ${token}`, true);
+    const res = await session.command(`AUTH PLAIN ${token}`, "AUTH PLAIN");
     if (res.code !== 235) {
       throw new SmtpError(
         "auth",
@@ -567,7 +602,7 @@ async function authenticate(
     log.add("hint", `Desafio CRAM-MD5 recibido (${challenge.length} caracteres).`);
 
     const digest = toHex(hmacMd5(new TextEncoder().encode(pass), new TextEncoder().encode(challenge)));
-    const answer = await session.command(b64Text(`${user} ${digest}`), true);
+    const answer = await session.command(b64Text(`${user} ${digest}`), "AUTH CRAM-MD5 respuesta");
 
     if (answer.code !== 235) {
       throw new SmtpError(
@@ -626,11 +661,19 @@ export async function probe(req: ProbeRequest, factory: TransportFactory): Promi
   // (mas un pequeño margen), aunque encadene varias operaciones.
   const hardLimitMs = timeoutMs + 5000;
 
-  const run = probeInner(req, log, facts, started, timeoutMs, factory);
+  // Sesion viva: el temporizador de limite resolvia la respuesta pero dejaba
+  // la lectura en marcha sobre un servidor que podia seguir enviando datos.
+  let active: Session | undefined;
+  const onSession = (session: Session | undefined): void => {
+    active = session;
+  };
+
+  const run = probeInner(req, log, facts, started, timeoutMs, factory, onSession);
 
   const guarded = new Promise<ProbeResponse>((resolve) => {
     const timer = setTimeout(() => {
       log.add("fail", `La comprobacion supero el limite de ${Math.round(hardLimitMs / 1000)}s.`);
+      void active?.close();
       resolve({
         ok: false,
         title: "Tiempo agotado",
@@ -674,6 +717,7 @@ async function probeInner(
   started: number,
   timeoutMs: number,
   factory: TransportFactory,
+  onSession?: (session: Session | undefined) => void,
 ): Promise<ProbeResponse> {
   const host = (req.host ?? "").trim();
   const port = Number(req.port);
@@ -705,7 +749,13 @@ async function probeInner(
       );
     }
     if (req.useAuth && !user) throw new SmtpError("input", "Indica el usuario o desmarca la autenticacion.");
-    if (req.send) {
+    if (mode !== "plain" && mode !== "starttls" && mode !== "implicit") {
+      throw new SmtpError("input", "El modo de cifrado debe ser plain, starttls o implicit.");
+    }
+    // El verbo de envio se decide SOLO con el booleano literal: la ruta ya lo
+    // canonicaliza para la cuota, y aqui no puede colarse un valor "verdadero"
+    // que no sea `true` (se enviaria sin cobrar el cupo).
+    if (req.send === true) {
       if (!req.from) throw new SmtpError("input", "Indica el remitente del correo de prueba.");
       if (!req.to) throw new SmtpError("input", "Indica el destinatario del correo de prueba.");
       extractAddress(req.from);
@@ -725,6 +775,7 @@ async function probeInner(
     phase = "conexion";
     const tConnect = Date.now();
     session = await Session.open(host, port, mode, log, timeoutMs, mask, factory);
+    onSession?.(session);
     const connectMs = Date.now() - tConnect;
     log.add("ok", `Conectado en ${connectMs} ms.`);
     addFact("Conexion TCP", `${connectMs} ms`);
@@ -786,7 +837,8 @@ async function probeInner(
       }
 
       log.add("info", "Actualizando la conexion a TLS...");
-      session = session.upgrade(log);
+      session = session.upgrade(log, host);
+      onSession?.(session);
 
       // Tras el upgrade hay que repetir EHLO.
       const ehloTls = await session.command(`EHLO ${heloName}`);
@@ -830,7 +882,7 @@ async function probeInner(
     }
 
     /* ---------- envio ---------- */
-    if (req.send) {
+    if (req.send === true) {
       phase = "envio";
 
       const from = extractAddress(req.from ?? "");
@@ -888,13 +940,14 @@ async function probeInner(
     }
 
     const elapsedMs = Date.now() - started;
-    const detail = req.send
-      ? `Conexion, ${req.useAuth ? "autenticacion" : "sin autenticacion"} y envio correctos en ${elapsedMs} ms.`
-      : `Conexion y ${req.useAuth ? "autenticacion" : "saludo"} correctos en ${elapsedMs} ms.`;
+    const detail =
+      req.send === true
+        ? `Conexion, ${req.useAuth ? "autenticacion" : "sin autenticacion"} y envio correctos en ${elapsedMs} ms.`
+        : `Conexion y ${req.useAuth ? "autenticacion" : "saludo"} correctos en ${elapsedMs} ms.`;
 
     return {
       ok: true,
-      title: req.send ? "Correo de prueba enviado" : "Comprobacion correcta",
+      title: req.send === true ? "Correo de prueba enviado" : "Comprobacion correcta",
       detail,
       phase: "completado",
       elapsedMs,
@@ -923,6 +976,7 @@ async function probeInner(
       code: err.code,
     };
   } finally {
+    onSession?.(undefined);
     if (session) await session.close();
   }
 }

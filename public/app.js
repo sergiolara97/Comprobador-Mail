@@ -213,7 +213,9 @@ function collectForm() {
     host: el.host.value.trim(),
     port: Number(el.port.value),
     mode: state.mode,
-    timeoutSec: Number(el.timeout.value) || 20,
+    // El servidor solo admite 2..120 s: se acota aqui para no enviar un valor
+    // que la API rechazaria con 400.
+    timeoutSec: clamp(Number(el.timeout.value) || 20, 2, 120),
     helo: el.helo.value.trim(),
     useAuth: el.useAuth.checked,
     user: el.user.value,
@@ -225,6 +227,12 @@ function collectForm() {
     subject: el.subject.value,
     body: el.body.value,
   };
+}
+
+/** Acota un numero al rango indicado. */
+function clamp(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(value, min), max);
 }
 
 function validate(send) {
@@ -355,7 +363,7 @@ async function runSweep() {
     const data = await postJson("/api/sweep", {
       host,
       ports,
-      timeoutSec: Number(el.sweepTimeout.value) || 3,
+      timeoutSec: clamp(Number(el.sweepTimeout.value) || 3, 1, 15),
     });
 
     const rows = data.results

@@ -65,7 +65,7 @@ const BLOCKED_V6: readonly (readonly [string, number])[] = [
 /* Analisis de direcciones                                             */
 /* ------------------------------------------------------------------ */
 
-function parseIpv4(value: string): number[] | undefined {
+export function parseIpv4(value: string): number[] | undefined {
   const parts = value.split(".");
   if (parts.length !== 4) return undefined;
 
@@ -81,7 +81,7 @@ function parseIpv4(value: string): number[] | undefined {
 }
 
 /** Devuelve los 8 grupos de 16 bits, o `undefined` si no es una IPv6 valida. */
-function parseIpv6(value: string): number[] | undefined {
+export function parseIpv6(value: string): number[] | undefined {
   let host = value;
   const zone = host.indexOf("%");
   if (zone >= 0) host = host.slice(0, zone); // fe80::1%eth0
@@ -192,8 +192,19 @@ export function isBlockedHost(host: unknown): boolean {
     return BLOCKED_V6.some(([net, len]) => v6PrefixMatch(v6, parseIpv6(net) ?? [], len));
   }
 
+  // Si queda un ":" es que no era una IPv6 valida: formas como
+  // "127.0.0.1:993" o "smtp.interno.internal:22" no las reconoce el parser de
+  // arriba y el runtime podria interpretarlas de otra manera, asi que se
+  // rechazan en vez de darlas por buenas.
+  if (h.includes(":")) return true;
+
   // Direcciones disfrazadas: 2130706433, 0177.0.0.1, 0x7f000001...
   if (/^\d[\d.]*$/.test(h) || h.startsWith("0x")) return true;
+
+  // Gramatica estricta de nombre: solo letras, digitos, punto, guion y guion
+  // bajo. Antes cualquier otra forma (no-ASCII, "%", corchetes sueltos...)
+  // caia en el fallback de abajo y se colaba como destino valido.
+  if (!/^[a-z0-9._-]+$/.test(h)) return true;
 
   // Un nombre sin puntos no existe en el DNS publico: es una maquina interna.
   return !h.includes(".");

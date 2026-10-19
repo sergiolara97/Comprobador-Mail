@@ -32,6 +32,8 @@ interface FakeOptions {
   rejectRcpt?: boolean;
   /** No responder nunca (para probar timeouts). */
   silent?: boolean;
+  /** Escribe un banner enorme SIN salto de linea (para probar el tope de bytes). */
+  bannerWithoutNewline?: boolean;
 }
 
 interface FakeServer {
@@ -44,6 +46,8 @@ interface FakeServer {
     authPassOk?: boolean;
     mailFrom?: string;
     rcptTo?: string;
+    /** Host que el cliente paso a startTls (nombre esperado del certificado). */
+    tlsExpectedHost?: string;
   };
   tlsUpgraded: () => boolean;
 }
@@ -71,9 +75,10 @@ function createFakeServer(opts: FakeOptions = {}): FakeServer {
     const clientSide: Transport = {
       readable: serverToClient.readable,
       writable: clientToServer.writable,
-      startTls(): Transport {
+      startTls(expectedHost?: string): Transport {
         // El "upgrade" en el simulador es un no-op: los mismos canales.
         tls = true;
+        received.tlsExpectedHost = expectedHost;
         if (mode !== "starttls" && mode !== "implicit") {
           throw new Error("startTls llamado en un modo sin TLS");
         }
@@ -98,7 +103,14 @@ function createFakeServer(opts: FakeOptions = {}): FakeServer {
       };
 
       if (mode === "implicit" && !opts.silent) tls = true;
-      if (!opts.silent) await write(`220 ${banner}`);
+      if (!opts.silent) {
+        if (opts.bannerWithoutNewline) {
+          // Linea enorme sin CRLF: el cliente debe cortar por tope de bytes.
+          await toClient.write(enc.encode("2" + "a".repeat(20_000)));
+        } else {
+          await write(`220 ${banner}`);
+        }
+      }
 
       for (;;) {
         const { value, done } = await reader.read();
@@ -444,6 +456,59 @@ async function run() {
     const server = createFakeServer();
     const res = await probe(baseReq({ host: "" }), server.factory);
     check("14. Sin host: error de validacion", !res.ok && res.code === "input", `${res.code}`);
+  }
+
+  // ---- 15. El verbo de envio exige el booleano `true` ----
+  {
+    const server = createFakeServer();
+    const res = await probe(
+      baseReq({
+        send: 1 as unknown as boolean,
+        from: "a@ejemplo.com",
+        to: "b@ejemplo.com",
+        useAuth: false,
+      }),
+      server.factory,
+    );
+    check("15. send no booleano: no se envia", res.ok && server.received.message === undefined, res.title);
+    check("15. send no booleano: sin MAIL FROM", server.received.mailFrom === undefined);
+  }
+
+  // ---- 16. El upgrade de TLS recibe el host del servidor ----
+  {
+    const server = createFakeServer();
+    const res = await probe(baseReq({ mode: "starttls" }), server.factory);
+    check("16. STARTTLS: upgrade correcto", res.ok, `${res.title}: ${res.detail}`);
+    check(
+      "16. STARTTLS: startTls recibe el host de la peticion",
+      server.received.tlsExpectedHost === "fake.smtp",
+      String(server.received.tlsExpectedHost),
+    );
+  }
+  {
+    const server = createFakeServer();
+    const res = await probe(baseReq({ mode: "implicit" }), server.factory);
+    check("16. Implicito: comprobacion correcta", res.ok, `${res.title}: ${res.detail}`);
+    check(
+      "16. Implicito: startTls recibe el host de la peticion",
+      server.received.tlsExpectedHost === "fake.smtp",
+      String(server.received.tlsExpectedHost),
+    );
+  }
+
+  // ---- 17. Respuesta sin salto de linea -> corte por tope de bytes ----
+  {
+    const server = createFakeServer({ bannerWithoutNewline: true });
+    const res = await probe(baseReq({ timeoutSec: 5 }), server.factory);
+    check("17. Linea sin fin: se corta con error de protocolo", !res.ok && res.code === "protocol", `${res.code}: ${res.detail}`);
+  }
+
+  // ---- 18. Modo de cifrado invalido ----
+  {
+    const server = createFakeServer();
+    const res = await probe(baseReq({ mode: "ssl" as unknown as ProbeRequest["mode"] }), server.factory);
+    check("18. Modo invalido: error de validacion", !res.ok && res.code === "input", `${res.code}: ${res.detail}`);
+    check("18. Modo invalido: no se abre conexion", server.received.commands.length === 0);
   }
 
   console.log(failures === 0 ? "\nTodo correcto." : `\n${failures} fallo(s).`);

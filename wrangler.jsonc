@@ -5,7 +5,12 @@
   "compatibility_date": "2026-10-19",
   "assets": {
     "directory": "./public",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    // Los assets existentes los servia directamente la capa de assets, sin
+    // pasar por el Worker, asi que no llevaban las cabeceras de seguridad
+    // (CSP incluida). Con run_worker_first las peticiones pasan por el Worker,
+    // que las reenvia a env.ASSETS.fetch anadiendolas.
+    "run_worker_first": true
   },
   "observability": {
     "enabled": true

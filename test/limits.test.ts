@@ -60,6 +60,18 @@ const bloqueados: string[] = [
   "2130706433", // 127.0.0.1 en decimal
   "0x7f000001",
   "0177.0.0.1",
+  // Formas con ":" que el parser no reconoce (antes se colaban como validas)
+  "127.0.0.1:993",
+  "10.0.0.1:587",
+  "169.254.169.254:587",
+  "smtp.interno.internal:22",
+  "[::1",
+  // Digitos no ASCII y otros caracteres fuera de la gramatica de nombre
+  "１２７.0.0.1",
+  "127.0.0.1%25",
+  "smtp%2eejemplo%2ecom",
+  "smtp ejemplo.com",
+  "smtp,ejemplo.com",
   "",
   "   ",
   null,
@@ -84,6 +96,7 @@ const permitidos: string[] = [
   "mail.empresa.co.uk",
   "smtp-v2.mailgun.org",
   "xn--e1afmkfd.xn--p1ai",
+  "smtp_1.ejemplo.com",
 ];
 
 for (const host of permitidos) {

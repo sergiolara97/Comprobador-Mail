@@ -25,9 +25,14 @@ export interface BucketResult {
 
 export const HOUR_MS = 3_600_000;
 
+/** Numero de hora desde la epoca; es el sufijo que llevan todos los cubos. */
+export function hourSuffix(now = Date.now()): string {
+  return String(Math.floor(now / HOUR_MS));
+}
+
 /** Nombre del cubo de una hora concreta: `api:29374`. */
 export function hourBucket(prefix: string, now = Date.now()): string {
-  return `${prefix}:${Math.floor(now / HOUR_MS)}`;
+  return `${prefix}:${hourSuffix(now)}`;
 }
 
 export class RateLimiter extends DurableObject {
@@ -41,11 +46,17 @@ export class RateLimiter extends DurableObject {
   /**
    * Suma una unidad a cada cubo y devuelve como ha quedado cada uno.
    *
-   * `keepFrom` permite tirar los cubos anteriores (solo se conserva la hora en
-   * curso); se hace unicamente cuando aparece un cubo nuevo, para no escribir en
-   * cada peticion.
+   * `keepHour` permite tirar los cubos de horas anteriores; se hace unicamente
+   * cuando aparece un cubo nuevo, para no escribir en cada peticion.
+   *
+   * El borrado se hace por el sufijo de hora (`%:<hora>`) y no comparando
+   * nombres: los cubos de una misma instancia pueden tener prefijos distintos
+   * (`api:` y `send:`) y el prefijo de envio ordena despues del de la API, asi
+   * que una comparacion lexicografica no los borraba nunca. Tampoco se puede
+   * borrar "todo lo que no este en la lista de esta peticion": una comprobacion
+   * sin envio borraria el cubo de envio de la misma hora y regalaria el cupo.
    */
-  hit(buckets: Bucket[], keepFrom?: string): BucketResult[] {
+  hit(buckets: Bucket[], keepHour?: string): BucketResult[] {
     const sql = this.ctx.storage.sql;
     const out: BucketResult[] = [];
     let nuevoCubo = false;
@@ -60,8 +71,8 @@ export class RateLimiter extends DurableObject {
       out.push({ bucket, ok: n <= max, n, max });
     }
 
-    if (nuevoCubo && keepFrom) {
-      sql.exec("DELETE FROM hits WHERE bucket < ?", keepFrom);
+    if (nuevoCubo && keepHour) {
+      sql.exec("DELETE FROM hits WHERE bucket NOT LIKE '%:' || ?", keepHour);
     }
 
     return out;

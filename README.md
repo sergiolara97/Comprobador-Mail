@@ -94,9 +94,11 @@ Estos límites son de la plataforma, no del código:
    huella, y no se puede aceptar un certificado autofirmado o caducado.
 4. **6 conexiones salientes simultáneas por petición.** El barrido de puertos se hace
    en tandas de 6.
-5. **Destinos bloqueados.** No se puede conectar a IPs de Cloudflare, `localhost`,
-   rangos privados (`10.x`, `192.168.x`...) ni al propio Worker. La app lo comprueba
-   antes de intentar conectar, para dar un mensaje claro (`src/lib/target.ts`).
+5. **Destinos bloqueados.** El runtime no deja conectar con `localhost`, rangos privados
+   ni direcciones de Cloudflare, y la aplicación lo rechaza antes incluso de intentarlo
+   para dar un mensaje claro (`src/lib/target.ts`: loopback, rangos privados y
+   reservados, `.local`/`.internal`, nombres de una sola etiqueta, direcciones
+   disfrazadas y formas que el parser no reconoce).
 
 ---
 
@@ -109,15 +111,19 @@ Cloudflare. Para que se pueda abrir sin que nadie la use de escudo, hay cuatro c
 | Capa | Dónde | Qué hace |
 |---|---|---|
 | Puertos permitidos | `src/lib/target.ts` | Solo 25, 465, 587, 2525, 993, 143, 110 y 995. Cualquier otro se rechaza antes de conectar, así que no sirve como escáner de puertos |
-| Destinos bloqueados | `src/lib/target.ts` | Loopback, rangos privados y reservados (IPv4 e IPv6), `localhost`, `.local`/`.internal`/`.home.arpa`, nombres de una sola etiqueta y direcciones disfrazadas (`2130706433`, `0x7f000001`) |
-| Máximo por barrido | `src/lib/target.ts` | 8 puertos por petición (antes 64) |
-| Cupos horarios | `src/lib/limiter.ts` + `src/index.ts` | 50 peticiones/hora por IP, **5 correos de prueba/hora por IP**, 1000/hora global y 50 correos/hora global |
+| Destinos bloqueados | `src/lib/target.ts` | Loopback, rangos privados y reservados (IPv4 e IPv6), `localhost`, `.local`/`.internal`/`.home.arpa`, nombres de una sola etiqueta y direcciones disfrazadas (`2130706433`, `0x7f000001`). Además se rechaza cualquier forma que el parser no reconozca: un `:` que no forme parte de una IPv6 válida (`127.0.0.1:993`) y todo nombre fuera de la gramática `[a-z0-9._-]` (por ejemplo dígitos no ASCII) |
+| Máximo por barrido | `src/lib/target.ts` | 8 puertos por petición |
+| Cuerpo de la petición | `src/index.ts` | `Content-Type: application/json` obligatorio (415 si no) y tope de 64 KiB comprobado **antes** de leer, cortando la lectura si el cliente no declara `Content-Length` |
+| Cupos horarios | `src/lib/limiter.ts` + `src/index.ts` | 50 peticiones/hora por IP, **5 correos de prueba/hora por IP**, 1000/hora global y 50 correos/hora global. La identidad es `CF-Connecting-IP` validada como IP (las IPv6 cuentan por prefijo /64) |
 
 Además, `src/index.ts` aplica un freno de ráfagas con el binding nativo `ratelimits`
-(5 peticiones cada 10 s por IP), que es barato pero **solo cuenta por ubicación de
-Cloudflare y con ventanas de 10 o 60 s**. Por eso los cupos largos (los de una hora)
-los lleva un **Durable Object** con backend SQLite: son exactos y globales, y caben en
-el plan gratuito (100.000 peticiones y 100.000 filas escritas al día).
+(5 peticiones cada 10 s **por IP**, sin multiplicar por endpoint), que es barato pero **solo
+cuenta por ubicación de Cloudflare y con ventanas de 10 o 60 s**. Por eso los cupos
+largos (los de una hora) los lleva un **Durable Object** con backend SQLite: son exactos y
+globales, y caben en el plan gratuito (100.000 peticiones y 100.000 filas escritas al día).
+
+Los cubos de una hora se podan por el sufijo de hora cuando aparece un cubo nuevo, de modo
+que tampoco se acumulan los de envío ni los del contador global.
 
 Los números se cambian en un solo sitio, `LIMITS` en `src/index.ts`; la lista de puertos
 y los rangos bloqueados, en `src/lib/target.ts` (con sus tests en `test/limits.test.ts`).
@@ -157,19 +163,29 @@ npm test             # tests de MD5, de la política de destinos y del protocolo
 ## Tests
 
 ```bash
-npm run test:md5     # vectores oficiales de MD5 y HMAC-MD5
-npm run test:limits  # puertos permitidos y hosts bloqueados
-npm run test:smtp    # 37 comprobaciones del protocolo SMTP
+npm run test:md5       # vectores oficiales de MD5 y HMAC-MD5
+npm run test:limits    # puertos permitidos y hosts bloqueados
+npm run test:identity  # identidad de red de los cupos (IPv4, IPv6 /64, desconocidas)
+npm run test:headers   # CSP (incluido el hash del script inline) y cabeceras
+npm run test:smtp      # 18 bloques de comprobaciones del protocolo SMTP
 ```
 
 El test SMTP levanta un servidor simulado en memoria y verifica: saludo, EHLO,
 STARTTLS, los tres mecanismos de autenticación (incluido el digest real de CRAM-MD5),
 el envío completo, la codificación RFC 2047 del asunto, el *dot stuffing*, el rechazo
-de inyección de cabeceras por CRLF, el bloqueo del puerto 25 y los tiempos de espera.
+de inyección de cabeceras por CRLF, el bloqueo del puerto 25, los tiempos de espera,
+que solo se envíe con `send: true`, que el *upgrade* de TLS reciba el host de la
+petición, el corte de una respuesta que no termina nunca y el rechazo de un modo de
+cifrado inválido.
 
 El test de límites comprueba la política de destinos: los 8 puertos permitidos, el
 rechazo del resto y la lista de hosts bloqueados (loopback, rangos privados, IPv6
-link-local, IPv4 mapeada, nombres internos y direcciones decimales o hexadecimales).
+link-local, IPv4 mapeada, nombres internos, direcciones decimales o hexadecimales,
+formas con `:<puerto>` y nombres fuera de la gramática).
+
+El test de cabeceras recalcula el hash del script inline del tema; si se toca ese
+script hay que actualizar `INLINE_THEME_SCRIPT_SHA256` en `src/lib/csp.ts` y el test
+lo avisa antes de que la CSP rompa el tema.
 
 ---
 
@@ -202,6 +218,11 @@ A partir de ahí, `git push` publica los cambios.
 
 > Si el despliegue falla con "Authentication error", revisa que el token tenga el
 > permiso **Workers Scripts: Edit** y **Account Settings: Read**.
+
+> El flujo declara `permissions: contents: read` y solo publica la rama `main`, de modo
+> que un lanzamiento manual desde otra rama no puede desplegar con el token de producción.
+> Las *Actions* siguen referenciadas por etiqueta mayor (`@v4`, `@v3`): si quieres cerrar
+> también esa vía, fíjalas a un SHA completo (`uses: actions/checkout@<sha>`).
 
 ### Manual
 
@@ -259,7 +280,17 @@ Cómo se comporta:
   responde `401`. La interfaz muestra el correo del usuario conectado en la cabecera.
 
 Las credenciales SMTP nunca se guardan: se usan para la comprobación en curso y se
-descartan. Las contraseñas se enmascaran en el registro (`AUTH LOGIN ********`).
+descarta. Las contraseñas se enmascaran en el registro del cliente: los intercambios de
+`AUTH` que llevan el usuario o la contraseña como único token no llegan a escribirse
+(`C: AUTH LOGIN contrasena ********`), y la contraseña nunca se envía en claro por un
+canal sin cifrar salvo que se elija el modo «Sin cifrado».
+
+La API solo acepta `Content-Type: application/json` en `/api/probe` y `/api/sweep`
+(415 en caso contrario), el `mode` tiene que ser `plain`, `starttls` o `implicit`, y el
+`send` solo se considera verdadero con el booleano `true`. Las respuestas de `public/`
+salen con `Content-Security-Policy` (que autoriza por hash el script inline del tema),
+`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` y
+`Cross-Origin-Opener-Policy`.
 
 ---
 
@@ -273,6 +304,9 @@ descartan. Las contraseñas se enmascaran en el registro (`AUTH LOGIN ********`)
 | `Sin saludo del servidor` en el 465 | Estás usando STARTTLS en el puerto del SSL implícito (o al revés). Cambia el modo. |
 | `Autenticación rechazada (535)` | Credenciales incorrectas, o el proveedor exige una "contraseña de aplicación". |
 | `400 Puerto no permitido` | Solo se comprueban los puertos SMTP habituales (ver *Uso público y control de abuso*). |
+| `400 El campo send debe ser booleano` | El verbo de envío del correo de prueba solo se activa con `"send": true`. |
+| `415 Se espera Content-Type: application/json` | La API solo acepta JSON (evita peticiones cruzadas sin preflight). |
+| `400 Ese servidor no se puede comprobar` | El destino es una red interna o reservada (`10.x`, `127.0.0.1`, `::1`, `.local`...), o una forma que la política no reconoce (`127.0.0.1:993`). |
 | `400 Ese servidor no se puede comprobar` | El destino es una red interna o reservada (`10.x`, `127.0.0.1`, `::1`, `.local`...). |
 | `429 Has agotado las 50 comprobaciones` | Cupo horario por IP cumplido; espera o cambia de red. |
 | `429 Demasiadas peticiones seguidas` | Freno de ráfagas (5 cada 10 s): espera unos segundos. |

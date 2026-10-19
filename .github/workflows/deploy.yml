@@ -11,6 +11,10 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
+# El flujo solo necesita leer el repositorio; el token no debe poder escribir.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Comprobar tipos y tests
@@ -34,6 +38,9 @@ jobs:
   deploy:
     name: Desplegar
     needs: test
+    # Con el token de produccion solo se publica la rama principal, tambien
+    # cuando el flujo se lanza a mano desde la pestana Actions.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
