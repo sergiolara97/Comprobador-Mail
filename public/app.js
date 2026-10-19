@@ -81,10 +81,23 @@ function setBusy(busy, message = "") {
   }
 }
 
+/* Iconos por estado: el color nunca es el unico portador del significado. */
+const BANNER_ICONS = {
+  idle: '<circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />',
+  busy: '<circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />',
+  ok: '<circle cx="12" cy="12" r="9" /><path d="m8.5 12.2 2.4 2.4 4.6-4.9" />',
+  warn: '<path d="M12 3.5 21 20H3z" /><path d="M12 9.5v4M12 16.6h.01" />',
+  fail: '<circle cx="12" cy="12" r="9" /><path d="m9 9 6 6M15 9l-6 6" />',
+};
+
 function setBanner(stateName, title, detail) {
   el.banner.dataset.state = stateName;
   el.bannerTitle.textContent = title;
   el.bannerDetail.textContent = detail;
+
+  const icon = el.banner.querySelector(".banner-icon svg");
+  if (icon) icon.innerHTML = BANNER_ICONS[stateName] ?? BANNER_ICONS.idle;
+
   el.bannerTime.textContent =
     stateName === "idle" || stateName === "busy"
       ? ""
@@ -180,7 +193,8 @@ function syncAuthFields() {
     if (field === el.showPass) continue;
     field.disabled = !enabled;
   }
-  el.authFields.style.opacity = enabled ? "1" : ".55";
+  // No se atenua el bloque con opacity: los campos ya se ven deshabilitados
+  // y atenuar el texto lo dejaba por debajo del contraste minimo.
 }
 
 function syncPassVisibility() {
@@ -482,6 +496,18 @@ for (const chip of document.querySelectorAll(".chip")) {
 
 el.useAuth.addEventListener("change", syncAuthFields);
 el.showPass.addEventListener("change", syncPassVisibility);
+
+/* El remitente sigue al usuario mientras no se haya escrito uno propio.
+   Si se vacia el remitente, vuelve a sincronizarse. */
+let fromEdited = false;
+
+el.user.addEventListener("input", () => {
+  if (!fromEdited) el.from.value = el.user.value;
+});
+
+el.from.addEventListener("input", () => {
+  fromEdited = el.from.value.trim() !== "";
+});
 
 el.showTrace.addEventListener("change", renderLog);
 
