@@ -1,0 +1,23 @@
+{
+  "name": "mailcheck-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Comprobador de servidores SMTP (TLS, autenticacion y envio de prueba) para Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types test/md5.test.ts && node --experimental-strip-types test/smtp.test.ts",
+    "test:md5": "node --experimental-strip-types test/md5.test.ts",
+    "test:smtp": "node --experimental-strip-types test/smtp.test.ts"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mailcheck",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-19",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  }
+
+  // Proteccion con Cloudflare Access (opcional pero recomendado).
+  // Descomenta y rellena tras crear la aplicacion Access:
+  //   TEAM_DOMAIN = "tu-equipo.cloudflareaccess.com"
+  //   POLICY_AUD  = "<Application Audience (AUD) Tag>"
+  //
+  // "vars": {
+  //   "TEAM_DOMAIN": "tu-equipo.cloudflareaccess.com",
+  //   "POLICY_AUD": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  // }
+}
