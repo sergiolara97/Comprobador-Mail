@@ -235,46 +235,74 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-function validate(send) {
+/** Primer dato que impide la comprobación. Con `send`, exige también remitente y destinatario. */
+function validationProblem(send) {
   if (!el.host.value.trim()) {
-    toast("Indica el servidor SMTP.");
-    el.host.focus();
-    return false;
+    return { field: el.host, message: "Indica el servidor SMTP.", hint: "servidor SMTP" };
   }
 
   const port = Number(el.port.value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    toast("El puerto debe estar entre 1 y 65535.");
-    el.port.focus();
-    return false;
+    return { field: el.port, message: "El puerto debe estar entre 1 y 65535.", hint: "un puerto válido (1-65535)" };
   }
 
   if (port === 25) {
-    toast("Cloudflare bloquea el puerto 25. Usa 587, 465 o 2525.");
-    el.port.focus();
-    return false;
+    return {
+      field: el.port,
+      message: "Cloudflare bloquea el puerto 25. Usa 587, 465 o 2525.",
+      hint: "un puerto distinto de 25 (bloqueado por Cloudflare)",
+    };
   }
 
   if (el.useAuth.checked && !el.user.value) {
-    toast("Indica el usuario o desmarca la autenticación.");
-    el.user.focus();
-    return false;
+    return {
+      field: el.user,
+      message: "Indica el usuario o desmarca la autenticación.",
+      hint: "usuario (o desmarca la autenticación)",
+    };
   }
 
   if (send) {
     if (!el.from.value.trim()) {
-      toast("Indica el remitente.");
-      el.from.focus();
-      return false;
+      return { field: el.from, message: "Indica el remitente.", hint: "indica el remitente" };
     }
     if (!el.to.value.trim()) {
-      toast("Indica el destinatario.");
-      el.to.focus();
-      return false;
+      return { field: el.to, message: "Indica el destinatario.", hint: "indica el destinatario" };
     }
   }
 
-  return true;
+  return null;
+}
+
+function validate(send) {
+  const problem = validationProblem(send);
+  if (!problem) return true;
+
+  toast(problem.message);
+  problem.field.focus();
+  return false;
+}
+
+/**
+ * Refleja en la barra inferior si ya se puede comprobar o enviar.
+ * Se llama al arrancar y cada vez que cambia el formulario.
+ */
+function updateReadiness() {
+  if (state.busy) return;
+
+  const checkProblem = validationProblem(false);
+  if (checkProblem) {
+    setStatus(`Completa los datos necesarios: ${checkProblem.hint}.`);
+    return;
+  }
+
+  const sendProblem = validationProblem(true);
+  if (sendProblem) {
+    setStatus(`Listo para comprobar. Para enviar, ${sendProblem.hint}.`);
+    return;
+  }
+
+  setStatus("Listo.");
 }
 
 /* ------------------------------------------------------------------ */
@@ -472,6 +500,10 @@ el.form.addEventListener("submit", (e) => {
   run(true);
 });
 
+// La barra inferior avisa en vivo de los datos que faltan.
+el.form.addEventListener("input", updateReadiness);
+el.form.addEventListener("change", updateReadiness);
+
 el.btnCheck.addEventListener("click", () => run(false));
 el.btnSweep.addEventListener("click", () => {
   el.sweepHost.value = el.host.value.trim();
@@ -486,6 +518,7 @@ for (const btn of document.querySelectorAll(".seg")) {
     const port = Number(el.port.value);
     if (btn.dataset.mode === "implicit" && (port === 587 || port === 25)) el.port.value = "465";
     if (btn.dataset.mode === "starttls" && (port === 465 || port === 25)) el.port.value = "587";
+    updateReadiness();
   });
 }
 
@@ -499,6 +532,7 @@ for (const chip of document.querySelectorAll(".chip")) {
       setMode("plain");
       toast("El puerto 25 no se puede probar desde Cloudflare.");
     } else setMode("starttls");
+    updateReadiness();
   });
 }
 
@@ -573,6 +607,7 @@ async function init() {
   setMode("starttls");
   renderFacts([]);
   renderLog();
+  updateReadiness();
   setBanner("idle", "Sin comprobaciones", "Rellena los datos y pulsa «Enviar correo de prueba».");
 
   // Marca el chip del puerto 25 como limitado.
