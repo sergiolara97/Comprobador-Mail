@@ -1,13 +1,14 @@
 /**
  * Barrido de puertos.
  *
- * Solo comprueba si el TCP acepta la conexion. Cloudflare limita a 6 las
- * conexiones salientes simultaneas por peticion, asi que se hace en tandas.
+ * Solo comprueba si el TCP acepta la conexion, y solo en los puertos SMTP
+ * permitidos por `target.ts`. Cloudflare limita a 6 las conexiones salientes
+ * simultaneas por peticion, asi que se hace en tandas.
  */
 import { connect } from "cloudflare:sockets";
+import { isAllowedPort, MAX_SWEEP_PORTS } from "./target.ts";
 import type { SweepPortResult, SweepResponse } from "./types.ts";
 
-const MAX_PORTS = 64;
 const CONCURRENCY = 6;
 const BANNER_TIMEOUT_MS = 1500;
 const BANNER_BYTES = 220;
@@ -94,12 +95,11 @@ export async function sweep(host: string, ports: number[], timeoutSec: number): 
 
   if (!cleanHost) throw new Error("Indica el servidor a comprobar.");
 
-  const unique = [...new Set(ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535))].slice(
-    0,
-    MAX_PORTS,
-  );
+  const unique = [...new Set(ports.filter((p) => isAllowedPort(p)))].slice(0, MAX_SWEEP_PORTS);
 
-  if (unique.length === 0) throw new Error("Indica al menos un puerto valido.");
+  if (unique.length === 0) {
+    throw new Error("Indica al menos un puerto valido (los SMTP habituales).");
+  }
 
   const timeoutMs = Math.min(Math.max(timeoutSec * 1000, 1000), 15_000);
   const results: SweepPortResult[] = [];

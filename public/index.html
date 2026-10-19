@@ -160,6 +160,8 @@
           <li><strong>Puerto 25 bloqueado.</strong> Cloudflare no permite conexiones salientes al 25. Usa 587, 465 o el alternativo de tu proveedor.</li>
           <li><strong>Versi&oacute;n de TLS no configurable.</strong> El runtime negocia autom&aacute;ticamente TLS 1.2 o 1.3.</li>
           <li><strong>Certificado no inspeccionable.</strong> Cloudflare valida siempre el certificado y no permite aceptar autofirmados o caducados.</li>
+          <li><strong>Solo puertos de correo.</strong> Se comprueban &uacute;nicamente los puertos SMTP habituales: 25, 465, 587, 2525, 993, 143, 110 y 995. M&aacute;ximo 8 por barrido.</li>
+          <li><strong>Servicio p&uacute;blico con cupos.</strong> 50 comprobaciones por hora y conexi&oacute;n (5 si env&iacute;as correo de prueba). Si los agotas ver&aacute;s un aviso y podr&aacute;s volver a intentarlo m&aacute;s tarde.</li>
         </ul>
       </details>
     </form>

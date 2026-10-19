@@ -9,7 +9,28 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+
+  // Cupos horarios por IP y globales. El Durable Object usa backend SQLite,
+  // que es el unico disponible en el plan gratuito de Workers.
+  // La migracion se aplica sola en `wrangler deploy`.
+  "durable_objects": {
+    "bindings": [{ "name": "LIMITER", "class_name": "RateLimiter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }],
+
+  // Freno de rafagas por IP. El binding nativo solo admite ventanas de 10 o 60
+  // segundos y sus contadores son locales a cada ubicacion de Cloudflare, asi
+  // que los cupos horarios exactos los lleva el Durable Object de arriba.
+  // El namespace_id debe ser un entero unico dentro de la cuenta: dos bindings
+  // con el mismo numero comparten contadores.
+  "ratelimits": [
+    {
+      "name": "RL_BURST",
+      "namespace_id": "7301",
+      "simple": { "limit": 5, "period": 10 }
+    }
+  ]
 
   // Proteccion con Cloudflare Access (opcional pero recomendado).
   // Descomenta y rellena tras crear la aplicacion Access:

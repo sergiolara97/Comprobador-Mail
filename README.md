@@ -13,6 +13,7 @@ envío de un correo de prueba, barrido de puertos y registro detallado de la ses
 - [Qué hace](#qué-hace)
 - [Arquitectura](#arquitectura)
 - [Límites de Cloudflare](#límites-de-cloudflare-importante)
+- [Uso público y control de abuso](#uso-público-y-control-de-abuso)
 - [Puesta en marcha](#puesta-en-marcha)
 - [Tests](#tests)
 - [Despliegue](#despliegue)
@@ -58,12 +59,15 @@ src/
     smtp.ts             Protocolo SMTP (transporte inyectable, probado con tests)
     cf-transport.ts     Transporte real sobre `cloudflare:sockets`
     sweep.ts            Barrido de puertos
+    target.ts           Política de destinos: puertos permitidos y hosts bloqueados
+    limiter.ts          Durable Object con los cupos horarios por IP y globales
     md5.ts              MD5 + HMAC-MD5 (para CRAM-MD5; WebCrypto no expone MD5)
     access.ts           Verificación del JWT de Cloudflare Access
     types.ts            Tipos compartidos
 
 test/
   md5.test.ts           MD5/HMAC-MD5 contra los vectores oficiales (RFC 1321 y 2202)
+  limits.test.ts        Puertos permitidos y hosts bloqueados
   smtp.test.ts          Protocolo completo contra un servidor SMTP simulado en memoria
 ```
 
@@ -91,7 +95,40 @@ Estos límites son de la plataforma, no del código:
 4. **6 conexiones salientes simultáneas por petición.** El barrido de puertos se hace
    en tandas de 6.
 5. **Destinos bloqueados.** No se puede conectar a IPs de Cloudflare, `localhost`,
-   rangos privados (`10.x`, `192.168.x`...) ni al propio Worker.
+   rangos privados (`10.x`, `192.168.x`...) ni al propio Worker. La app lo comprueba
+   antes de intentar conectar, para dar un mensaje claro (`src/lib/target.ts`).
+
+---
+
+## Uso público y control de abuso
+
+La herramienta está pensada para ser **pública** (sin login), pero tal cual permite
+escanear puertos y autenticarse contra servidores SMTP arbitrarios desde las IPs de
+Cloudflare. Para que se pueda abrir sin que nadie la use de escudo, hay cuatro capas:
+
+| Capa | Dónde | Qué hace |
+|---|---|---|
+| Puertos permitidos | `src/lib/target.ts` | Solo 25, 465, 587, 2525, 993, 143, 110 y 995. Cualquier otro se rechaza antes de conectar, así que no sirve como escáner de puertos |
+| Destinos bloqueados | `src/lib/target.ts` | Loopback, rangos privados y reservados (IPv4 e IPv6), `localhost`, `.local`/`.internal`/`.home.arpa`, nombres de una sola etiqueta y direcciones disfrazadas (`2130706433`, `0x7f000001`) |
+| Máximo por barrido | `src/lib/target.ts` | 8 puertos por petición (antes 64) |
+| Cupos horarios | `src/lib/limiter.ts` + `src/index.ts` | 50 peticiones/hora por IP, **5 correos de prueba/hora por IP**, 1000/hora global y 50 correos/hora global |
+
+Además, `src/index.ts` aplica un freno de ráfagas con el binding nativo `ratelimits`
+(5 peticiones cada 10 s por IP), que es barato pero **solo cuenta por ubicación de
+Cloudflare y con ventanas de 10 o 60 s**. Por eso los cupos largos (los de una hora)
+los lleva un **Durable Object** con backend SQLite: son exactos y globales, y caben en
+el plan gratuito (100.000 peticiones y 100.000 filas escritas al día).
+
+Los números se cambian en un solo sitio, `LIMITS` en `src/index.ts`; la lista de puertos
+y los rangos bloqueados, en `src/lib/target.ts` (con sus tests en `test/limits.test.ts`).
+
+Al pasarse, la API responde `429` con un mensaje que la interfaz ya muestra tal cual.
+
+Más allá de esto, el techo real de la plataforma sigue ahí: en el plan gratuito son
+100.000 peticiones al día, y el cupo global (1000/hora) impide que un abuso lo agote.
+
+Para un cierre de verdad, sigue valiendo **Cloudflare Access** (ver más abajo): es la
+opción recomendada si en algún momento dejas de necesitar que sea público.
 
 ---
 
@@ -108,7 +145,7 @@ Otros comandos:
 
 ```bash
 npm run typecheck    # comprobación de tipos (tsc --noEmit)
-npm test             # tests de MD5 y del protocolo SMTP
+npm test             # tests de MD5, de la política de destinos y del protocolo SMTP
 ```
 
 > **Nota sobre redes corporativas.** Si tu red tiene un firewall que intercepta TLS
@@ -121,6 +158,7 @@ npm test             # tests de MD5 y del protocolo SMTP
 
 ```bash
 npm run test:md5     # vectores oficiales de MD5 y HMAC-MD5
+npm run test:limits  # puertos permitidos y hosts bloqueados
 npm run test:smtp    # 37 comprobaciones del protocolo SMTP
 ```
 
@@ -128,6 +166,10 @@ El test SMTP levanta un servidor simulado en memoria y verifica: saludo, EHLO,
 STARTTLS, los tres mecanismos de autenticación (incluido el digest real de CRAM-MD5),
 el envío completo, la codificación RFC 2047 del asunto, el *dot stuffing*, el rechazo
 de inyección de cabeceras por CRLF, el bloqueo del puerto 25 y los tiempos de espera.
+
+El test de límites comprueba la política de destinos: los 8 puertos permitidos, el
+rechazo del resto y la lista de hosts bloqueados (loopback, rangos privados, IPv6
+link-local, IPv4 mapeada, nombres internos y direcciones decimales o hexadecimales).
 
 ---
 
@@ -153,6 +195,11 @@ Configúralo una sola vez:
 
 A partir de ahí, `git push` publica los cambios.
 
+> La primera vez, el despliegue crea el Durable Object `RateLimiter` aplicando la
+> migración `v1` de `wrangler.jsonc`. No hay que crear nada a mano en el panel: ni el
+> Durable Object, ni los cupos, ni las alertas. Si más adelante cambia el esquema de
+> la tabla, hará falta una migración nueva (otra entrada en `migrations`).
+
 > Si el despliegue falla con "Authentication error", revisa que el token tenga el
 > permiso **Workers Scripts: Edit** y **Account Settings: Read**.
 
@@ -171,7 +218,10 @@ dominio personalizado para el Worker (`mailcheck.tudominio.com`) desde el panel 
 
 ## Proteger con Cloudflare Access
 
-Esta herramienta **recibe credenciales SMTP reales**, así que no debe quedar abierta.
+Con los cupos de *Uso público y control de abuso*, la app se puede dejar abierta. Access
+es el **modo estricto**: úsalo si además quieres saber quién la usa o cerrarla a tu equipo.
+Ten en cuenta que esta herramienta **recibe credenciales SMTP reales**.
+
 Además, con Access activo el Worker verifica el token por su cuenta, de modo que la URL
 `*.workers.dev` (que **no** pasa por Access) también queda protegida.
 
@@ -182,15 +232,11 @@ Además, con Access activo el Worker verifica el token por su cuenta, de modo qu
    - **Session duration:** lo que prefieras (por ejemplo 24 h)
 4. Añade una **policy**: `Allow` → `Emails` → tu correo (o el dominio de tu equipo).
 5. Guarda y copia el **Application Audience (AUD) Tag** de la sección *Overview*.
-6. Rellena `vars` en `wrangler.jsonc`:
+6. Añade el bloque `vars` a `wrangler.jsonc` (solo se muestran las claves relevantes;
+   el archivo también lleva `durable_objects`, `migrations` y `ratelimits`):
 
 ```jsonc
 {
-  "name": "mailcheck",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-10-19",
-  "assets": { "directory": "./public", "binding": "ASSETS" },
-  "observability": { "enabled": true },
   "vars": {
     "TEAM_DOMAIN": "tu-equipo.cloudflareaccess.com",
     "POLICY_AUD": "el-aud-tag-que-has-copiado"
@@ -206,8 +252,8 @@ npm run deploy
 
 Cómo se comporta:
 
-- **Sin `TEAM_DOMAIN` ni `POLICY_AUD`:** la app queda abierta. Válido para desarrollo,
-  peligroso en producción.
+- **Sin `TEAM_DOMAIN` ni `POLICY_AUD`:** la app queda abierta y la protegen los cupos de
+  *Uso público y control de abuso*.
 - **Con las dos variables:** toda llamada a `/api/*` debe traer un token de Access
   válido (firma RS256, `aud` y `exp` comprobados contra el JWKS del equipo). Si no,
   responde `401`. La interfaz muestra el correo del usuario conectado en la cabecera.
@@ -226,6 +272,10 @@ descartan. Las contraseñas se enmascaran en el registro (`AUTH LOGIN ********`)
 | `Fallo al negociar TLS` con certificado | Certificado autofirmado o caducado: Cloudflare no permite aceptarlo. |
 | `Sin saludo del servidor` en el 465 | Estás usando STARTTLS en el puerto del SSL implícito (o al revés). Cambia el modo. |
 | `Autenticación rechazada (535)` | Credenciales incorrectas, o el proveedor exige una "contraseña de aplicación". |
+| `400 Puerto no permitido` | Solo se comprueban los puertos SMTP habituales (ver *Uso público y control de abuso*). |
+| `400 Ese servidor no se puede comprobar` | El destino es una red interna o reservada (`10.x`, `127.0.0.1`, `::1`, `.local`...). |
+| `429 Has agotado las 50 comprobaciones` | Cupo horario por IP cumplido; espera o cambia de red. |
+| `429 Demasiadas peticiones seguidas` | Freno de ráfagas (5 cada 10 s): espera unos segundos. |
 | `401 No autorizado` en la web | La sesión de Cloudflare Access ha caducado: recarga e inicia sesión de nuevo. |
 | El 465 falla solo en local | Un firewall corporativo intercepta TLS. En Cloudflare funciona. |
 

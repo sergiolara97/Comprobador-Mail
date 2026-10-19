@@ -10,10 +10,11 @@ El ejecutable original se conserva como referencia; **no lo borres**.
 npm install
 npm run dev        # wrangler dev -> http://127.0.0.1:8787
 npm run typecheck  # tsc --noEmit
-npm test           # md5 + smtp + contraste
+npm test           # md5 + limites + smtp + contraste
 ```
 
-Tests sueltos: `npm run test:md5`, `npm run test:smtp`, `npm run test:contrast`.
+Tests sueltos: `npm run test:md5`, `npm run test:limits`, `npm run test:smtp`,
+`npm run test:contrast`.
 
 En CI (`.github/workflows/deploy.yml`) cada push a `main` encadena
 **typecheck → test → deploy**. Un `npm test` en rojo bloquea el despliegue.
@@ -44,6 +45,23 @@ conversación y el servidor responde a una línea vacía. Fue un bug real.
 **MD5/HMAC-MD5 es propio (`src/lib/md5.ts`)** porque WebCrypto no expone MD5 y
 CRAM-MD5 lo necesita. No lo sustituyas por `crypto.subtle`.
 
+**`src/lib/target.ts` (puertos permitidos y hosts bloqueados) es lógica pura.** No puede
+importar `cloudflare:sockets` ni nada del runtime: `test/limits.test.ts` lo ejecuta en
+Node, y el protocolo SMTP y el barrido lo usan como puerta de entrada. El barrido
+(`src/lib/sweep.ts`) vuelve a filtrar con la misma función, aunque `src/index.ts` ya lo
+haya hecho: es defensa en profundidad, no duplicación inútil.
+
+**El puerto 25 sigue en `ALLOWED_PORTS` a propósito.** No se conecta nunca (Cloudflare lo
+bloquea), pero se deja llegar al protocolo para que `smtp.ts`/`sweep.ts` emitan su
+mensaje específico de plataforma en vez de un error genérico de política.
+
+**Los cupos horarios viven en el Durable Object `RateLimiter`** (`src/lib/limiter.ts`),
+y la clase **tiene que exportarse desde `src/index.ts`** o wrangler no la registra. Si
+cambia la tabla `hits`, hace falta un tag nuevo en `migrations` de `wrangler.jsonc`. Los
+`namespace_id` de `ratelimits` deben ser únicos en la cuenta: dos bindings con el mismo
+número comparten contadores. Los números de los cupos están en `LIMITS`, en
+`src/index.ts`.
+
 ## Interfaz
 
 - **Sin build**: `public/` se sirve tal cual como assets estáticos vía el binding
@@ -61,11 +79,13 @@ CRAM-MD5 lo necesita. No lo sustituyas por `crypto.subtle`.
 
 ## Configuración y despliegue
 
-- `wrangler.jsonc`: Worker `mailcheck`, binding `ASSETS`.
+- `wrangler.jsonc`: Worker `mailcheck`, binding `ASSETS`, Durable Object `LIMITER`
+  (`RateLimiter`) con su migración `v1`, y el binding `ratelimits` `RL_BURST` (5/10 s por
+  IP). El despliegue aplica la migración solo: **no hay que crear nada en el panel**.
 - **Cloudflare Access es opcional.** Con `TEAM_DOMAIN` y `POLICY_AUD` definidos, el
   Worker verifica el JWT en `/api/*` (`src/lib/access.ts`). Sin ellos la app queda
-  abierta: vale en local, es inseguro en producción — la herramienta recibe credenciales
-  SMTP reales.
+  abierta: la sostienen los cupos (50/hora por IP, 5 envíos de prueba, 1000/hora global)
+  y no la cierres sin querer — la herramienta recibe credenciales SMTP reales.
 - La URL `*.workers.dev` **no pasa por Access**; de ahí que la verificación se haga
   dentro del Worker y no solo con una política.
 - El CI necesita los secretos `CLOUDFLARE_API_TOKEN` y `CLOUDFLARE_ACCOUNT_ID`.
@@ -79,6 +99,9 @@ CRAM-MD5 lo necesita. No lo sustituyas por `crypto.subtle`.
   negocia y valida por su cuenta. Estas funciones del `.exe` original no se pueden
   portar; la interfaz las declara en la tarjeta "Límites de la versión web".
 - **6 conexiones salientes simultáneas** por petición: el barrido va en tandas.
+- **El binding `ratelimits` solo admite ventanas de 10 o 60 s** y sus contadores son
+  locales a cada ubicación de Cloudflare. Por eso los cupos horarios exactos los lleva un
+  Durable Object y el binding solo frena ráfagas.
 - **En esta red, un firewall Sophos intercepta el puerto 465 en local** con un
   certificado autofirmado, así que probar 465 contra `wrangler dev` falla y devuelve
   "el servidor cerró la conexión". En el edge de Cloudflare funciona. No persigas ese
